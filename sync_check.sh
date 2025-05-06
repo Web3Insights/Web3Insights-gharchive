@@ -1,23 +1,63 @@
 #!/bin/bash
 
+# Cross-platform date handling
+date_cmd() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        # macOS (BSD date)
+        if [[ "$1" == "validate" ]]; then
+            # Validate date format
+            if date -j -f "%Y-%m-%d" "$2" >/dev/null 2>&1; then
+                return 0
+            else
+                return 1
+            fi
+        elif [[ "$1" == "timestamp" ]]; then
+            # Get timestamp from date
+            date -j -f "%Y-%m-%d" "$2" "+%s" 2>/dev/null
+        elif [[ "$1" == "next_day" ]]; then
+            # Get next day
+            next_ts=$(($(date -j -f "%Y-%m-%d" "$2" "+%s" 2>/dev/null) + 86400))
+            date -r $next_ts "+%Y-%m-%d" 2>/dev/null
+        elif [[ "$1" == "format" ]]; then
+            # Format date components
+            date -j -f "%Y-%m-%d" "$2" "+$3" 2>/dev/null
+        fi
+    else
+        # Linux (GNU date)
+        if [[ "$1" == "validate" ]]; then
+            if date -d "$2" >/dev/null 2>&1; then
+                return 0
+            else
+                return 1
+            fi
+        elif [[ "$1" == "timestamp" ]]; then
+            date -d "$2" "+%s"
+        elif [[ "$1" == "next_day" ]]; then
+            date -d "$2 + 1 day" "+%Y-%m-%d"
+        elif [[ "$1" == "format" ]]; then
+            date -d "$2" "+$3"
+        fi
+    fi
+}
+
 # Set start date to January 1, 2020
 start_date="2020-01-01"
 # Set end date, default is current date
 end_date="2025-05-01"
 # Get current date
-current_date=$(date +%Y-%m-%d)
+current_date=$(date "+%Y-%m-%d")
 # Download directory
 download_dir="./data"
 
 # Validate end date format
-if ! date -d "$end_date" &>/dev/null; then
+if ! date_cmd validate "$end_date"; then
     echo "Error: Invalid end date '$end_date'. Please use YYYY-MM-DD format"
     exit 1
 fi
 
 # Ensure end date doesn't exceed current date
-end_timestamp=$(date -d "$end_date" +%s)
-current_timestamp=$(date -d "$current_date" +%s)
+end_timestamp=$(date_cmd timestamp "$end_date")
+current_timestamp=$(date_cmd timestamp "$current_date")
 if [ $end_timestamp -gt $current_timestamp ]; then
     echo "Warning: End date exceeds current date. Using $current_date instead"
     end_date=$current_date
@@ -74,7 +114,7 @@ parallel_verify_day() {
 }
 
 # Convert start date to Unix timestamp
-start_timestamp=$(date -d "$start_date" +%s)
+start_timestamp=$(date_cmd timestamp "$start_date")
 
 # Ensure GNU Parallel is installed
 if ! command -v parallel &>/dev/null; then
@@ -83,32 +123,44 @@ if ! command -v parallel &>/dev/null; then
     exit 1
 fi
 
+# Determine if we should use nproc or sysctl for CPU count
+get_cpu_count() {
+    if command -v nproc &>/dev/null; then
+        nproc
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        sysctl -n hw.ncpu
+    else
+        echo 4  # Default fallback
+    fi
+}
+CPU_COUNT=$(get_cpu_count)
+
 # Iterate through each day from start date to end date
 d="$start_date"
-while [ "$(date -d "$d" +%s)" -le "$end_timestamp" ]; do
+while [ "$(date_cmd timestamp "$d")" -le "$end_timestamp" ]; do
     echo "Processing data for $d..."
 
+    # Extract date components
+    year=$(date_cmd format "$d" "%Y")
+    month=$(date_cmd format "$d" "%m")
+    day=$(date_cmd format "$d" "%d")
+
     # Create directory by year/month
-    year_month_dir="$download_dir/$(date -d "$d" +%Y/%m)"
+    year_month_dir="$download_dir/$year/$month"
     mkdir -p "$year_month_dir"
 
     # Create aria2c input file for the current day
-    input_file="$download_dir/aria2c_input_$(date -d "$d" +%Y%m%d).txt"
+    input_file="$download_dir/aria2c_input_${year}${month}${day}.txt"
     >"$input_file"
 
     # Flag indicating if any files need downloading
     need_download=false
 
-    # Extract date components
-    year=$(date -d "$d" +%Y)
-    month=$(date -d "$d" +%m)
-    day=$(date -d "$d" +%d)
-
     # Parallel file integrity check
     echo "Checking file integrity for $d in parallel..."
     temp_verify_file=$(mktemp)
 
-    seq 0 23 | parallel --will-cite -j$(nproc) "
+    seq 0 23 | parallel --will-cite -j$CPU_COUNT "
         hour={}
         output_file=\"$year_month_dir/$year-$month-$day-\$hour.json.gz\"
         url=\"https://data.gharchive.org/$year-$month-$day-\$hour.json.gz\"
@@ -159,7 +211,7 @@ while [ "$(date -d "$d" +%s)" -le "$end_timestamp" ]; do
     fi
 
     # Move to next day
-    d=$(date -d "$d + 1 day" +%Y-%m-%d)
+    d=$(date_cmd next_day "$d")
 done
 
 echo "Processing complete! Data from $start_date to $end_date has been processed."
